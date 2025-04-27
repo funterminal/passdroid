@@ -1,4 +1,3 @@
-my project info to understand you my project well and I don't completely fully never need feedback and suggestions and pls don't gave me that:
 # PassDroid - Advanced System Authentication Manager
 
 ## Overview
