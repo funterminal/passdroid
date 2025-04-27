@@ -6,19 +6,28 @@ import sys
 import getpass
 import shutil
 import datetime
+import subprocess
 from rich.console import Console
 from rich.prompt import Prompt, Confirm
-from rich.progress import track
 
 console = Console()
+
 base_dir = os.path.expanduser("~/.passdroid")
 password_file = os.path.join(base_dir, "password.hash")
 expire_file = os.path.join(base_dir, "expire.date")
 codes_file = os.path.join(base_dir, "codes.txt")
 
+system_dir = "/etc/droid"
+system_password_file = os.path.join(system_dir, "system.hash")
+system_expire_file = os.path.join(system_dir, "system_expire.date")
+
 def ensure_base_dir():
     if not os.path.exists(base_dir):
         os.makedirs(base_dir, mode=0o700)
+
+def ensure_system_dir():
+    if not os.path.exists(system_dir):
+        os.makedirs(system_dir, mode=0o700)
 
 def hash_password(password):
     return hashlib.sha512(password.encode()).hexdigest()
@@ -39,7 +48,9 @@ def check_password(input_password):
     return hash_password(input_password) == stored_hash
 
 def is_common_password(password):
-    common = ['1234567890', 'password', 'qwerty', 'abc123', '111111', '123123', 'abc', '123456']
+    common = [
+        '1234567890', 'password', 'qwerty', 'abc123', '111111', '123123', 'abc', '123456'
+    ]
     return password in common
 
 def check_quality(password):
@@ -48,10 +59,14 @@ def check_quality(password):
     if is_common_password(password):
         return "Common"
     strength = 0
-    if any(c.islower() for c in password): strength += 1
-    if any(c.isupper() for c in password): strength += 1
-    if any(c.isdigit() for c in password): strength += 1
-    if any(c in "!@#$%^&*()-_=+[{]};:'\",<.>/?\\|" for c in password): strength += 1
+    if any(c.islower() for c in password):
+        strength += 1
+    if any(c.isupper() for c in password):
+        strength += 1
+    if any(c.isdigit() for c in password):
+        strength += 1
+    if any(c in "!@#$%^&*()-_=+[{]};:'\",<.>/?\\|" for c in password):
+        strength += 1
     if strength == 4:
         return "Strong"
     elif strength == 3:
@@ -148,32 +163,36 @@ def update_shell_config():
 
 def create_auth_script():
     script_path = os.path.join(base_dir, "authenticate.py")
-    script = f'''
-import hashlib
+    script = f'''import hashlib
 import getpass
 import sys
 import os
+import datetime
+
 password_file = os.path.expanduser("{password_file}")
 expire_file = os.path.expanduser("{expire_file}")
+
 def hash_password(password):
     return hashlib.sha512(password.encode()).hexdigest()
+
 def load_password_hash():
     if not os.path.exists(password_file):
         sys.exit(0)
     with open(password_file, "r") as f:
         return f.read().strip()
+
 def check_expiry():
     if not os.path.exists(expire_file):
         return False
     with open(expire_file, "r") as f:
-        import datetime
         expiry_date = f.read().strip()
-        try:
-            expiry = datetime.datetime.strptime(expiry_date, "%a %b %d %H:%M:%S %z %Y")
-            now = datetime.datetime.now(datetime.timezone.utc)
-            return now > expiry
-        except Exception:
-            return False
+    try:
+        expiry = datetime.datetime.strptime(expiry_date, "%a %b %d %H:%M:%S %z %Y")
+        now = datetime.datetime.now(datetime.timezone.utc)
+        return now > expiry
+    except Exception:
+        return False
+
 while True:
     password = getpass.getpass("Enter your system password: ")
     if hash_password(password) == load_password_hash():
@@ -188,14 +207,47 @@ while True:
         f.write(script)
     os.chmod(script_path, 0o700)
 
+def set_system_password(new_password):
+    if os.geteuid() != 0:
+        console.print("[bold red]Error: System password setup requires root privileges.[/bold red]")
+        sys.exit(1)
+    console.print("[bold red blink]WARNING: You are about to change the real Linux user password![/bold red blink]")
+    confirm = Confirm.ask("[bold yellow]Are you absolutely sure you want to continue?[/bold yellow]")
+    if not confirm:
+        console.print("[bold red]Operation cancelled.[/bold red]")
+        sys.exit(1)
+    username = os.getenv("SUDO_USER") or os.getenv("USER")
+    if not username:
+        console.print("[bold red]Could not determine username.[/bold red]")
+        sys.exit(1)
+    if len(new_password) < 14:
+        console.print("[bold red]Error:[/bold red] System password must be at least 14 characters.")
+        sys.exit(1)
+    if is_common_password(new_password):
+        console.print("[bold red]Error:[/bold red] Password too common.")
+        sys.exit(1)
+    try:
+        subprocess.run(["chpasswd"], input=f"{username}:{new_password}".encode(), check=True)
+    except Exception as e:
+        console.print(f"[bold red]Failed to set system password: {e}[/bold red]")
+        sys.exit(1)
+    ensure_system_dir()
+    hashed = hash_password(new_password)
+    with open(system_password_file, "w") as f:
+        f.write(hashed)
+    os.chmod(system_password_file, 0o600)
+    console.print("[bold green]System password successfully updated.[/bold green]")
+
 def main():
     parser = argparse.ArgumentParser(description="Passdroid - Advanced Password Manager")
     parser.add_argument("--set-password", type=str, help="Set a new password")
     parser.add_argument("--expire", type=str, help="Set password expiration date")
     parser.add_argument("--quality", type=str, help="Check password quality")
-    parser.add_argument("--generate", nargs="?", const=True, help="Generate a strong password")
+    parser.add_argument("--generate", nargs="?", const=True, help="Generate a strong password or recovery codes")
     parser.add_argument("--remove-password", action="store_true", help="Remove the current password")
     parser.add_argument("--generate-codes", type=str, help="Generate recovery codes to a file")
+    parser.add_argument("--system", type=str, help="Set a system level password and change OS login")
+
     args = parser.parse_args()
 
     if args.set_password:
@@ -214,6 +266,8 @@ def main():
             generate_password()
     elif args.remove_password:
         remove_password()
+    elif args.system:
+        set_system_password(args.system)
     else:
         console.print("[bold red]No option selected. Use --help for available commands.[/bold red]")
 
